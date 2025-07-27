@@ -6,6 +6,7 @@
 
 # Cline configuration
 .clinerules/
+.clineignore
 
 # Go build artifacts
 main
