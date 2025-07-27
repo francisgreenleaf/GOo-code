@@ -4,6 +4,9 @@
 .env.production
 .env.development
 
+# Cline configuration
+.clinerules/
+
 # Go build artifacts
 main
 anthropic-chat
