@@ -190,8 +190,32 @@ type Agent struct {
 	systemPrompt   string
 }
 
-// countConversationTokens counts the total tokens in the current conversation
-func (a *Agent) countConversationTokens(ctx context.Context, conversation []anthropic.MessageParam) (int, error) {
+// estimateConversationTokens provides a client-side approximation of token count
+func (a *Agent) estimateConversationTokens(conversation []anthropic.MessageParam) int {
+	if len(conversation) == 0 {
+		return 0
+	}
+
+	totalChars := 0
+	totalChars += len(a.systemPrompt) // System prompt
+
+	// Estimate tokens for messages - simplified approach
+	for _, msg := range conversation {
+		// Use JSON encoding to get approximate size
+		msgBytes, _ := json.Marshal(msg)
+		totalChars += len(msgBytes)
+	}
+
+	// Add estimated overhead for tools and structure (rough approximation)
+	toolOverhead := len(a.tools) * 200 // ~200 chars per tool definition
+	totalChars += toolOverhead
+
+	// Rough conversion: ~4 characters per token (conservative estimate)
+	return totalChars / 4
+}
+
+// countConversationTokensAccurate gets precise token count via API (used sparingly)
+func (a *Agent) countConversationTokensAccurate(ctx context.Context, conversation []anthropic.MessageParam) (int, error) {
 	if len(conversation) == 0 {
 		return 0, nil
 	}
@@ -219,6 +243,21 @@ func (a *Agent) countConversationTokens(ctx context.Context, conversation []anth
 	}
 
 	return int(tokenCount.InputTokens), nil
+}
+
+// countConversationTokens provides intelligent token counting - uses estimation for quick checks,
+// accurate API counting only when needed
+func (a *Agent) countConversationTokens(ctx context.Context, conversation []anthropic.MessageParam) (int, error) {
+	// Use fast estimation first
+	estimated := a.estimateConversationTokens(conversation)
+
+	// If we're well under the limit, use estimation to save API calls
+	if estimated < MaxTokensLimit*3/4 { // 75% threshold
+		return estimated, nil
+	}
+
+	// If we're close to the limit, use accurate counting
+	return a.countConversationTokensAccurate(ctx, conversation)
 }
 
 // summarizeConversation creates a summary of older messages in the conversation
@@ -528,13 +567,13 @@ type ToolDefinition struct {
 
 var ReadFileDefinition = ToolDefinition{
 	Name:        "read_file",
-	Description: "Read the contents of a given relative file path. Use this when you want to see what's inside a file. Do not use this with directory names.",
+	Description: "Read file contents from relative path within working directory.",
 	InputSchema: ReadFileInputSchema,
 	Function:    func(input json.RawMessage) (string, error) { return currentAgent.ReadFile(input) },
 }
 
 type ReadFileInput struct {
-	Path string `json:"path" jsonschema_description:"The relative path of a file in the working directory."`
+	Path string `json:"path" jsonschema_description:"Relative file path in working directory."`
 }
 
 var ReadFileInputSchema = GenerateSchema[ReadFileInput]()
@@ -560,13 +599,13 @@ func (a *Agent) ReadFile(input json.RawMessage) (string, error) {
 
 var ListFilesDefinition = ToolDefinition{
 	Name:        "list_files",
-	Description: "List files and directories at a given path. If no path is provided, lists files in the current directory.",
+	Description: "List files and directories at specified path (defaults to current directory).",
 	InputSchema: ListFilesInputSchema,
 	Function:    func(input json.RawMessage) (string, error) { return currentAgent.ListFiles(input) },
 }
 
 type ListFilesInput struct {
-	Path string `json:"path,omitempty" jsonschema_description:"Optional relative path to list files from. Defaults to current directory if not provided."`
+	Path string `json:"path,omitempty" jsonschema_description:"Optional relative path (defaults to current directory)."`
 }
 
 var ListFilesInputSchema = GenerateSchema[ListFilesInput]()
@@ -621,32 +660,32 @@ func (a *Agent) ListFiles(input json.RawMessage) (string, error) {
 
 var EditFileDefinition = ToolDefinition{
 	Name:        "edit_file",
-	Description: "Perform sophisticated file editing operations including insert, delete, replace, and append. Supports line-based operations with precise control over positioning. Can apply multiple operations in a single call. If the file doesn't exist, it will be created.",
+	Description: "Edit files with insert, delete, replace, append operations. Supports line-based positioning and multiple operations per call.",
 	InputSchema: EditFileInputSchema,
 	Function:    func(input json.RawMessage) (string, error) { return currentAgent.EditFile(input) },
 }
 
 type EditFileInput struct {
-	Path       string          `json:"path" jsonschema_description:"The relative path of the file to edit."`
-	Operations []EditOperation `json:"operations" jsonschema_description:"List of edit operations to apply to the file."`
+	Path       string          `json:"path" jsonschema_description:"Relative file path to edit."`
+	Operations []EditOperation `json:"operations" jsonschema_description:"Edit operations to apply."`
 }
 
 type EditOperation struct {
-	Type     string       `json:"type" jsonschema_description:"The type of operation: 'insert', 'delete', 'replace', or 'append'"`
-	Location LocationSpec `json:"location" jsonschema_description:"Where to perform the operation"`
-	Content  string       `json:"content,omitempty" jsonschema_description:"Content for insert/replace operations"`
+	Type     string       `json:"type" jsonschema_description:"Operation type: insert, delete, replace, append"`
+	Location LocationSpec `json:"location" jsonschema_description:"Operation location"`
+	Content  string       `json:"content,omitempty" jsonschema_description:"Content for insert/replace"`
 }
 
 type LocationSpec struct {
-	LineNumber *int       `json:"line_number,omitempty" jsonschema_description:"1-based line number for line-based operations"`
-	LineRange  *LineRange `json:"line_range,omitempty" jsonschema_description:"Range of lines for multi-line operations"`
-	Pattern    *string    `json:"pattern,omitempty" jsonschema_description:"Regex pattern to match content"`
-	Position   string     `json:"position" jsonschema_description:"Position relative to location: 'at', 'before', 'after', 'start', 'end'"`
+	LineNumber *int       `json:"line_number,omitempty" jsonschema_description:"1-based line number"`
+	LineRange  *LineRange `json:"line_range,omitempty" jsonschema_description:"Line range"`
+	Pattern    *string    `json:"pattern,omitempty" jsonschema_description:"Regex pattern"`
+	Position   string     `json:"position" jsonschema_description:"Position: at, before, after, start, end"`
 }
 
 type LineRange struct {
-	Start int `json:"start" jsonschema_description:"Start line number (1-based, inclusive)"`
-	End   int `json:"end" jsonschema_description:"End line number (1-based, inclusive)"`
+	Start int `json:"start" jsonschema_description:"Start line (1-based)"`
+	End   int `json:"end" jsonschema_description:"End line (1-based)"`
 }
 
 var EditFileInputSchema = GenerateSchema[EditFileInput]()
@@ -704,7 +743,7 @@ func (a *Agent) EditFile(input json.RawMessage) (string, error) {
 		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
-	return fmt.Sprintf("File edited successfully. Applied %d operation(s). Updated contents:\n\n%s", len(editFileInput.Operations), newContent), nil
+	return fmt.Sprintf("File edited successfully. Applied %d operation(s) to %s", len(editFileInput.Operations), editFileInput.Path), nil
 }
 
 // applyOperation applies a single edit operation to the lines
