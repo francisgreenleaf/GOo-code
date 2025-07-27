@@ -317,6 +317,16 @@ func (a *Agent) manageConversationLength(ctx context.Context, conversation []ant
 func (a *Agent) Run(ctx context.Context) error {
 	conversation := []anthropic.MessageParam{}
 
+	fmt.Println(`  ▄████  ▒█████   ▒█████   ▄████▄   ▒█████  ▓█████▄ ▓█████ 
+ ██▒ ▀█▒▒██▒  ██▒▒██▒  ██▒▒██▀ ▀█  ▒██▒  ██▒▒██▀ ██▌▓█   ▀ 
+▒██░▄▄▄░▒██░  ██▒▒██░  ██▒▒▓█    ▄ ▒██░  ██▒░██   █▌▒███   
+░▓█  ██▓▒██   ██░▒██   ██░▒▓▓▄ ▄██▒▒██   ██░░▓█▄   ▌▒▓█  ▄ 
+░▒▓███▀▒░ ████▓▒░░ ████▓▒░▒ ▓███▀ ░░ ████▓▒░░▒████▓ ░▒████▒
+ ░▒   ▒ ░ ▒░▒░▒░ ░ ▒░▒░▒░ ░ ░▒ ▒  ░░ ▒░▒░▒░  ▒▒▓  ▒ ░░ ▒░ ░
+  ░   ░   ░ ▒ ▒░   ░ ▒ ▒░   ░  ▒     ░ ▒ ▒░  ░ ▒  ▒  ░ ░  ░
+░ ░   ░ ░ ░ ░ ▒  ░ ░ ░ ▒  ░        ░ ░ ░ ▒   ░ ░  ░    ░   
+      ░     ░ ░      ░ ░  ░ ░          ░ ░     ░       ░  ░
+                          ░                  ░             `)
 	fmt.Println("Chat with GooCode (use 'ctrl-c' to quit)")
 	fmt.Printf("Type '/cd' to change working directory\n")
 	fmt.Printf("Type '/tokens' to see current token count\n\n")
