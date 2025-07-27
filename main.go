@@ -26,6 +26,16 @@ const (
 // Global variable for current agent (needed for tool functions)
 var currentAgent *Agent
 
+// loadSystemPrompt loads the system prompt from file with fallback to default
+func loadSystemPrompt() string {
+	content, err := os.ReadFile("system_prompt.txt")
+	if err != nil {
+		log.Printf("Warning: Could not load system_prompt.txt: %v. Using default prompt.", err)
+		return "You are GooCode, a helpful AI coding assistant with access to file operations within the working directory. You have three tools: read_file, list_files, and edit_file."
+	}
+	return string(content)
+}
+
 // Helper functions for directory management
 func promptForDirectory(scanner *bufio.Scanner) (string, error) {
 	fmt.Print("Enter the directory you'd like to work in (or press Enter for current directory): ")
@@ -168,6 +178,7 @@ func NewAgent(
 		getUserMessage: getUserMessage,
 		tools:          tools,
 		workingDir:     workingDir,
+		systemPrompt:   loadSystemPrompt(),
 	}
 }
 
@@ -176,6 +187,7 @@ type Agent struct {
 	getUserMessage func() (string, bool)
 	tools          []ToolDefinition
 	workingDir     string
+	systemPrompt   string
 }
 
 // countConversationTokens counts the total tokens in the current conversation
@@ -305,7 +317,7 @@ func (a *Agent) manageConversationLength(ctx context.Context, conversation []ant
 func (a *Agent) Run(ctx context.Context) error {
 	conversation := []anthropic.MessageParam{}
 
-	fmt.Println("Chat with Claude (use 'ctrl-c' to quit)")
+	fmt.Println("Chat with GooCode (use 'ctrl-c' to quit)")
 	fmt.Printf("Type '/cd' to change working directory\n")
 	fmt.Printf("Type '/tokens' to see current token count\n\n")
 
@@ -435,8 +447,11 @@ func (a *Agent) runInference(ctx context.Context, conversation []anthropic.Messa
 	message, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.ModelClaude3_7SonnetLatest,
 		MaxTokens: int64(1024),
-		Messages:  conversation,
-		Tools:     tools,
+		System: []anthropic.TextBlockParam{
+			{Text: a.systemPrompt},
+		},
+		Messages: conversation,
+		Tools:    tools,
 	})
 	return message, err
 }
