@@ -404,14 +404,11 @@ func (a *Agent) Run(ctx context.Context) error {
 			toolResults := []anthropic.ContentBlockParamUnion{}
 			hasToolUse := false
 
+			// Process tool use blocks (text output is already handled by streaming)
 			for _, content := range message.Content {
 				switch block := content.AsAny().(type) {
-				case anthropic.TextBlock:
-					fmt.Printf("\u001b[93mClaude\u001b[0m: %s\n", block.Text)
 				case anthropic.ToolUseBlock:
 					hasToolUse = true
-					inputJSON, _ := json.Marshal(block.Input)
-					fmt.Printf("\u001b[92m[Tool: %s]\u001b[0m: %s\n", block.Name, string(inputJSON))
 
 					// Execute the tool
 					result, err := a.executeTool(block.Name, block.Input)
@@ -454,7 +451,8 @@ func (a *Agent) runInference(ctx context.Context, conversation []anthropic.Messa
 		tools[i] = anthropic.ToolUnionParam{OfTool: &toolParam}
 	}
 
-	message, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
+	// Use streaming API for real-time response
+	stream := a.client.Messages.NewStreaming(ctx, anthropic.MessageNewParams{
 		Model:     anthropic.ModelClaude3_7SonnetLatest,
 		MaxTokens: int64(1024),
 		System: []anthropic.TextBlockParam{
@@ -463,7 +461,53 @@ func (a *Agent) runInference(ctx context.Context, conversation []anthropic.Messa
 		Messages: conversation,
 		Tools:    tools,
 	})
-	return message, err
+
+	message := anthropic.Message{}
+	hasStartedTextOutput := false
+
+	for stream.Next() {
+		event := stream.Current()
+		err := message.Accumulate(event)
+		if err != nil {
+			return nil, fmt.Errorf("failed to accumulate stream event: %w", err)
+		}
+
+		// Process different event types for real-time output
+		switch eventVariant := event.AsAny().(type) {
+		case anthropic.ContentBlockDeltaEvent:
+			switch deltaVariant := eventVariant.Delta.AsAny().(type) {
+			case anthropic.TextDelta:
+				// Print Claude header only when we start receiving text
+				if !hasStartedTextOutput {
+					fmt.Print("\u001b[93mClaude\u001b[0m: ")
+					hasStartedTextOutput = true
+				}
+				// Print text as it arrives
+				print(deltaVariant.Text)
+			}
+		case anthropic.ContentBlockStartEvent:
+			// Handle the start of tool use blocks
+			if block, ok := eventVariant.ContentBlock.AsAny().(anthropic.ToolUseBlock); ok {
+				if hasStartedTextOutput {
+					fmt.Println() // New line after any text output
+				}
+				inputJSON, _ := json.Marshal(block.Input)
+				fmt.Printf("\u001b[92m[Tool: %s]\u001b[0m: %s\n", block.Name, string(inputJSON))
+				hasStartedTextOutput = false // Reset for potential follow-up text
+			}
+		}
+	}
+
+	if stream.Err() != nil {
+		return nil, fmt.Errorf("streaming error: %w", stream.Err())
+	}
+
+	// Add a newline if we had text output
+	if hasStartedTextOutput {
+		fmt.Println()
+	}
+
+	return &message, nil
 }
 
 func (a *Agent) executeTool(toolName string, input json.RawMessage) (string, error) {
@@ -577,14 +621,32 @@ func (a *Agent) ListFiles(input json.RawMessage) (string, error) {
 
 var EditFileDefinition = ToolDefinition{
 	Name:        "edit_file",
-	Description: "Make edits to a file. The input should be a JSON object with the file path and the changes to apply. If the file specified does not exist, it will be created. Returns the updated file contents for verification.",
+	Description: "Perform sophisticated file editing operations including insert, delete, replace, and append. Supports line-based operations with precise control over positioning. Can apply multiple operations in a single call. If the file doesn't exist, it will be created.",
 	InputSchema: EditFileInputSchema,
 	Function:    func(input json.RawMessage) (string, error) { return currentAgent.EditFile(input) },
 }
 
 type EditFileInput struct {
-	Path    string `json:"path" jsonschema_description:"The relative path of the file to edit."`
-	Changes string `json:"changes" jsonschema_description:"The changes to apply to the file. This should be a string containing the changes to apply, such as 'add line 1', 'remove line 2', etc."`
+	Path       string          `json:"path" jsonschema_description:"The relative path of the file to edit."`
+	Operations []EditOperation `json:"operations" jsonschema_description:"List of edit operations to apply to the file."`
+}
+
+type EditOperation struct {
+	Type     string       `json:"type" jsonschema_description:"The type of operation: 'insert', 'delete', 'replace', or 'append'"`
+	Location LocationSpec `json:"location" jsonschema_description:"Where to perform the operation"`
+	Content  string       `json:"content,omitempty" jsonschema_description:"Content for insert/replace operations"`
+}
+
+type LocationSpec struct {
+	LineNumber *int       `json:"line_number,omitempty" jsonschema_description:"1-based line number for line-based operations"`
+	LineRange  *LineRange `json:"line_range,omitempty" jsonschema_description:"Range of lines for multi-line operations"`
+	Pattern    *string    `json:"pattern,omitempty" jsonschema_description:"Regex pattern to match content"`
+	Position   string     `json:"position" jsonschema_description:"Position relative to location: 'at', 'before', 'after', 'start', 'end'"`
+}
+
+type LineRange struct {
+	Start int `json:"start" jsonschema_description:"Start line number (1-based, inclusive)"`
+	End   int `json:"end" jsonschema_description:"End line number (1-based, inclusive)"`
 }
 
 var EditFileInputSchema = GenerateSchema[EditFileInput]()
@@ -600,30 +662,184 @@ func (a *Agent) EditFile(input json.RawMessage) (string, error) {
 		return "", fmt.Errorf("path is required")
 	}
 
+	if len(editFileInput.Operations) == 0 {
+		return "", fmt.Errorf("at least one operation is required")
+	}
+
 	fullPath, err := a.resolveFilePath(editFileInput.Path)
 	if err != nil {
 		return "", err
 	}
 
-	// For simplicity, we'll just append the changes to the file
-	file, err := os.OpenFile(fullPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	// Read existing file content or create empty if file doesn't exist
+	var lines []string
+	if _, err := os.Stat(fullPath); err == nil {
+		content, err := os.ReadFile(fullPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to read existing file: %w", err)
+		}
+		lines = strings.Split(string(content), "\n")
+		// Remove the last empty line if file ends with newline
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+	}
+
+	// Apply operations in order
+	for i, op := range editFileInput.Operations {
+		lines, err = a.applyOperation(lines, op)
+		if err != nil {
+			return "", fmt.Errorf("failed to apply operation %d (%s): %w", i+1, op.Type, err)
+		}
+	}
+
+	// Write the modified content back to file
+	newContent := strings.Join(lines, "\n")
+	if len(lines) > 0 {
+		newContent += "\n" // Add final newline
+	}
+
+	err = os.WriteFile(fullPath, []byte(newContent), 0644)
 	if err != nil {
-		return "", fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
-	if _, err := file.WriteString(editFileInput.Changes + "\n"); err != nil {
-		return "", fmt.Errorf("failed to write changes to file: %w", err)
+		return "", fmt.Errorf("failed to write file: %w", err)
 	}
 
-	// Read back the file contents for verification
-	updatedContent, err := os.ReadFile(fullPath)
-	if err != nil {
-		return "", fmt.Errorf("file edited but failed to read back contents: %w", err)
+	return fmt.Sprintf("File edited successfully. Applied %d operation(s). Updated contents:\n\n%s", len(editFileInput.Operations), newContent), nil
+}
+
+// applyOperation applies a single edit operation to the lines
+func (a *Agent) applyOperation(lines []string, op EditOperation) ([]string, error) {
+	switch op.Type {
+	case "insert":
+		return a.applyInsert(lines, op)
+	case "delete":
+		return a.applyDelete(lines, op)
+	case "replace":
+		return a.applyReplace(lines, op)
+	case "append":
+		return a.applyAppend(lines, op)
+	default:
+		return nil, fmt.Errorf("unknown operation type: %s", op.Type)
+	}
+}
+
+// applyInsert handles insert operations
+func (a *Agent) applyInsert(lines []string, op EditOperation) ([]string, error) {
+	insertLines := strings.Split(op.Content, "\n")
+
+	switch op.Location.Position {
+	case "start":
+		return append(insertLines, lines...), nil
+	case "end":
+		return append(lines, insertLines...), nil
+	case "at":
+		if op.Location.LineNumber != nil {
+			lineNum := *op.Location.LineNumber
+			if lineNum < 1 {
+				return nil, fmt.Errorf("line number must be >= 1")
+			}
+			if lineNum > len(lines)+1 {
+				return nil, fmt.Errorf("line number %d is beyond end of file (%d lines)", lineNum, len(lines))
+			}
+			// Insert at the specified line (1-based indexing)
+			insertPos := lineNum - 1
+			result := make([]string, 0, len(lines)+len(insertLines))
+			result = append(result, lines[:insertPos]...)
+			result = append(result, insertLines...)
+			result = append(result, lines[insertPos:]...)
+			return result, nil
+		}
+		return nil, fmt.Errorf("line_number is required for 'at' position with insert")
+	case "before", "after":
+		if op.Location.LineNumber != nil {
+			lineNum := *op.Location.LineNumber
+			if lineNum < 1 || lineNum > len(lines) {
+				return nil, fmt.Errorf("line number %d is out of range (1-%d)", lineNum, len(lines))
+			}
+			insertPos := lineNum - 1
+			if op.Location.Position == "after" {
+				insertPos++
+			}
+			result := make([]string, 0, len(lines)+len(insertLines))
+			result = append(result, lines[:insertPos]...)
+			result = append(result, insertLines...)
+			result = append(result, lines[insertPos:]...)
+			return result, nil
+		}
+		return nil, fmt.Errorf("line_number is required for '%s' position with insert", op.Location.Position)
+	default:
+		return nil, fmt.Errorf("invalid position '%s' for insert operation", op.Location.Position)
+	}
+}
+
+// applyDelete handles delete operations
+func (a *Agent) applyDelete(lines []string, op EditOperation) ([]string, error) {
+	if op.Location.LineRange != nil {
+		start := op.Location.LineRange.Start
+		end := op.Location.LineRange.End
+		if start < 1 || end < 1 || start > len(lines) || end > len(lines) || start > end {
+			return nil, fmt.Errorf("invalid line range %d-%d for file with %d lines", start, end, len(lines))
+		}
+		// Delete lines in range (1-based indexing)
+		result := make([]string, 0, len(lines)-(end-start+1))
+		result = append(result, lines[:start-1]...)
+		result = append(result, lines[end:]...)
+		return result, nil
 	}
 
-	// Return success message with file contents
-	return fmt.Sprintf("File edited successfully. Updated contents:\n\n%s", string(updatedContent)), nil
+	if op.Location.LineNumber != nil {
+		lineNum := *op.Location.LineNumber
+		if lineNum < 1 || lineNum > len(lines) {
+			return nil, fmt.Errorf("line number %d is out of range (1-%d)", lineNum, len(lines))
+		}
+		// Delete single line (1-based indexing)
+		result := make([]string, 0, len(lines)-1)
+		result = append(result, lines[:lineNum-1]...)
+		result = append(result, lines[lineNum:]...)
+		return result, nil
+	}
+
+	return nil, fmt.Errorf("line_number or line_range is required for delete operation")
+}
+
+// applyReplace handles replace operations
+func (a *Agent) applyReplace(lines []string, op EditOperation) ([]string, error) {
+	replacementLines := strings.Split(op.Content, "\n")
+
+	if op.Location.LineRange != nil {
+		start := op.Location.LineRange.Start
+		end := op.Location.LineRange.End
+		if start < 1 || end < 1 || start > len(lines) || end > len(lines) || start > end {
+			return nil, fmt.Errorf("invalid line range %d-%d for file with %d lines", start, end, len(lines))
+		}
+		// Replace lines in range (1-based indexing)
+		result := make([]string, 0, len(lines)-(end-start+1)+len(replacementLines))
+		result = append(result, lines[:start-1]...)
+		result = append(result, replacementLines...)
+		result = append(result, lines[end:]...)
+		return result, nil
+	}
+
+	if op.Location.LineNumber != nil {
+		lineNum := *op.Location.LineNumber
+		if lineNum < 1 || lineNum > len(lines) {
+			return nil, fmt.Errorf("line number %d is out of range (1-%d)", lineNum, len(lines))
+		}
+		// Replace single line (1-based indexing)
+		result := make([]string, 0, len(lines)-1+len(replacementLines))
+		result = append(result, lines[:lineNum-1]...)
+		result = append(result, replacementLines...)
+		result = append(result, lines[lineNum:]...)
+		return result, nil
+	}
+
+	return nil, fmt.Errorf("line_number or line_range is required for replace operation")
+}
+
+// applyAppend handles append operations (for backwards compatibility)
+func (a *Agent) applyAppend(lines []string, op EditOperation) ([]string, error) {
+	appendLines := strings.Split(op.Content, "\n")
+	return append(lines, appendLines...), nil
 }
 
 func createNewfile(filePath, content string) (string, error) {

@@ -14,11 +14,24 @@ You have access to three powerful tools for file system operations:
    - Helps you understand project structure and locate specific files
    - Returns both files and directories (directories end with "/")
 
-3. **edit_file**: Create new files or append content to existing files
-   - Use this to make changes, add code, create new files, or append content
+3. **edit_file**: Perform sophisticated file editing operations with precision
+   - Supports four operation types: insert, delete, replace, and append
+   - **Insert operations**: Add content at specific positions
+     - Insert at file start/end: `{"type": "insert", "location": {"position": "start/end"}, "content": "new content"}`
+     - Insert at specific line: `{"type": "insert", "location": {"line_number": 5, "position": "at"}, "content": "new line"}`
+     - Insert before/after line: `{"type": "insert", "location": {"line_number": 3, "position": "before/after"}, "content": "new content"}`
+   - **Delete operations**: Remove lines or ranges
+     - Delete single line: `{"type": "delete", "location": {"line_number": 5}}`
+     - Delete line range: `{"type": "delete", "location": {"line_range": {"start": 2, "end": 4}}}`
+   - **Replace operations**: Replace existing content
+     - Replace single line: `{"type": "replace", "location": {"line_number": 3}, "content": "replacement"}`
+     - Replace line range: `{"type": "replace", "location": {"line_range": {"start": 2, "end": 4}}, "content": "new content"}`
+   - **Append operations**: Add content to end of file (backwards compatibility)
+     - Simple append: `{"type": "append", "content": "content to add"}`
+   - Can apply multiple operations in a single call for complex edits
+   - All line numbers are 1-based (first line is line 1)
    - If the file doesn't exist, it will be created
-   - Currently appends content to existing files
-   - Useful for implementing fixes, adding features, or creating new files
+   - Returns the complete updated file contents for verification
 
 ## Security and Constraints
 
