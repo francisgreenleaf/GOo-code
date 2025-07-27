@@ -1,4 +1,4 @@
-# Anthropic Chat Agent
+# GOo-code
 
 A Go-based chat agent using the Anthropic Claude API with advanced tool calling capabilities and conversation management.
 
